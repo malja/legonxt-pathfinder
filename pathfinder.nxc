@@ -1,0 +1,414 @@
+///////////////////////////////////////////////////////////////////////////////
+// BRICK PORT DEFINITIONS
+///////////////////////////////////////////////////////////////////////////////
+
+/**
+   Motor ports
+**/
+const int MOTOR_LEFT = OUT_A;
+const int MOTOR_RIGHT = OUT_B;
+
+/**
+   Sensor ports
+**/
+const int PORT_LIGHT = IN_1;
+const int PORT_TOUCH_RIGHT = IN_2;
+const int PORT_TOUCH_LEFT = IN_3;
+const int PORT_ULTRASONIC = IN_4;
+
+/**
+   Brick control buttons
+**/
+
+const int BUTTON_CENTER = BTN4;
+const int BUTTON_LEFT = BTN3;
+const int BUTTON_RIGHT = BTN2;
+const int BUTTON_EXIT = BTN1;
+
+////////////////////////////////////////////////////////////////////////////////
+// ULTRASOUND MODULE DEFINITIONS
+////////////////////////////////////////////////////////////////////////////////
+
+/**
+    After some measurement, this value (in centimeters) should be substracted 
+    from each distance measurement to get more accurate results.
+**/
+const float US_CALIBRATION = 2.096774194;
+
+/**
+    Distance from wall in centimeters which should the robot mantain. 
+**/
+const byte DISTANCE_TO_KEEP = 12; 
+
+/**
+    Delay in milliseconds between each distance measurement. Keep it up 15.
+**/
+const byte US_DELAY_MS = 20;
+
+////////////////////////////////////////////////////////////////////////////////
+// PID DEFINITIONS
+////////////////////////////////////////////////////////////////////////////////
+
+/**
+    Maximal reachable speed (Motors support value up to 100)
+**/
+const byte MOTOR_POWER = 60;
+
+/**
+    PID values for line follower task. 
+**/
+const float PID_LINE_PROPORTIONAL = (0.48)*5.7;
+const float PID_LINE_INTEGRAL =  (0.00384)*26;
+const float PID_LINE_DERIVATIVE = (15)*26.5;
+
+/**
+    PD values for maze solver task
+**/
+const float PID_MAZE_PROPORTIONAL = 3.8;
+const float PID_MAZE_DERIVATIVE = 3;
+
+////////////////////////////////////////////////////////////////////////////////
+// GLOBAL VARIABLES
+////////////////////////////////////////////////////////////////////////////////
+
+/**
+    Minimum reflected light level (on black color)
+**/
+int g_light_min = 0;
+
+/**
+    Maximum reflected light level (on white color)
+**/
+int g_light_max = 0;
+
+/**
+    (g_light_max + g_light_min)/2
+**/
+int g_light_mid = 0;
+
+/**
+    Value of latest distance measurement. It is updated from updateDistance
+**/
+int g_distance = 256;
+
+/**
+    Global distance measurement switcher.
+    AKA should the updateDistance task update the distance?
+**/
+bool g_should_update = true;
+
+////////////////////////////////////////////////////////////////////////////////
+// FUNCTIONS
+////////////////////////////////////////////////////////////////////////////////
+
+/**
+  Prepares min, max and mid light values.
+**/
+void CalibrateLightSensor() {
+
+     ClearScreen();
+
+     TextOut(0, LCD_LINE1, "Calibration" );
+     TextOut(0, LCD_LINE2, "White (LeftBtn)" );
+     until( ButtonPressed( BUTTON_LEFT, true ) );
+     g_light_max = Sensor( PORT_LIGHT);
+     
+     TextOut(0, LCD_LINE3, "Black (RightBtn)" );
+     until( ButtonPressed( BUTTON_RIGHT, true ) );
+     g_light_min = Sensor( PORT_LIGHT );
+     Wait(500);
+     
+     g_light_mid = (g_light_max + g_light_min) / 2;
+
+}
+
+/**
+    What to do after head-on hit.
+    left - Is left button pressed?
+    right - Is right button pressed?
+**/
+void Rotate( bool left, bool right) {
+
+    // Make sure we stay straight against the wall
+    if (left && !right) {
+       OnFwd( MOTOR_RIGHT, 50 );
+    } else if ( right && !left ) {
+       OnFwd( MOTOR_LEFT, 50 );
+    }
+    Wait( 250 );
+
+    // Reverse
+    OnFwdSync( OUT_AB, -40, 0);
+    Wait(500);
+  
+    // Rotate 90 degrees
+    OnFwdSync( OUT_AB, 45, 50);
+    Wait(600);
+    
+    // Move a bit forward
+    OnFwdSync( OUT_AB, +40, 0);
+    Wait(500);
+
+}
+
+/**
+    Move both motors forward.
+**/
+void Forward() {
+     OnFwdSync( OUT_AB, 40, 0);
+     Wait(250);
+}
+
+/**
+    "Hack" to get the robot back on black line.
+**/
+void RotateFinish() {
+    // Rotate
+    OnFwdSync( OUT_AB, 20, 50);
+    Wait(250);
+
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+// TASKS
+////////////////////////////////////////////////////////////////////////////////
+
+/**
+    This task is called right after the robot "sees" white undelay.
+    It means, we are out of the maze and it is neccessary to follow
+    line back to the finish.
+**/
+task followFinishLine() {
+
+    float error = 0.0;
+    float last_error = 0.0;
+
+    float integral = 0.0;
+    float derivative = 0.0;
+     
+    float turn = 0.0;
+     
+    int pwr_1 = 0;
+    int pwr_2 = 0;
+
+    RotateFinish();
+    Wait(1000);
+
+    while( true ) {
+
+            error = (g_light_mid - Sensor( PORT_LIGHT ));
+
+            integral = integral + error;
+            derivative = (error - last_error);
+
+            turn = PID_LINE_PROPORTIONAL * error + PID_LINE_INTEGRAL * integral + PID_LINE_DERIVATIVE * derivative;
+
+            if ( integral > 2*error || integral < -2*error ) {
+               integral = 0.0;
+            }
+
+            pwr_1 = 60 + turn;
+            pwr_2 = 60 - turn;
+
+            if (pwr_1 > 100 ) {
+               pwr_1 = 100;
+            } else if ( pwr_1 < -100 ) {
+              pwr_1 = -100;
+            }
+
+            if (pwr_2 > 100 ) {
+               pwr_2 = 100;
+            } else if ( pwr_2 < -100 ) {
+              pwr_2 = -100;
+            }
+
+            OnFwd( MOTOR_RIGHT, pwr_1);
+            OnFwd( MOTOR_LEFT, pwr_2);
+
+            ClearScreen();
+            NumOut(0, LCD_LINE1, error );
+            NumOut(0, LCD_LINE2, integral );
+            NumOut(0, LCD_LINE3, derivative );
+            NumOut(0, LCD_LINE4, turn );
+            NumOut(0, LCD_LINE6, g_distance );
+
+
+            last_error = error;
+     }
+}
+
+/**
+    This task solves the maze by following the wall
+    at set distance.
+**/
+task solveMaze() {
+
+     float error = 0.0;
+     float last_error = 0.0;
+     float derivative = 0.0;
+
+     bool touch_left, touch_right = false;
+     int light = 0;
+
+     int turn = 0;
+     int pwr_1 = 0;
+     int pwr_2 = 0;
+     int distance = 0;
+
+     while( true ) {
+     
+         light = Sensor( PORT_LIGHT );
+         
+         if (light * 0.8 < g_light_min ) {
+            break;
+         }
+
+         touch_left = Sensor( PORT_TOUCH_LEFT );
+         touch_right = Sensor( PORT_TOUCH_RIGHT );
+
+         if ( touch_left || touch_right ) {
+            Rotate(touch_left, touch_right);
+            continue;
+         }
+
+         distance = (SensorUS(PORT_ULTRASONIC) - US_CALIBRATION);
+         if (distance > 18 ) {
+            distance = 18;
+         } else if ( distance < 6 ) {
+            distance = 6;
+         }
+
+         error = (distance - DISTANCE_TO_KEEP);
+         derivative = last_error - error;
+
+         turn = PID_MAZE_PROPORTIONAL * error + PID_MAZE_DERIVATIVE * derivative;
+         pwr_1 = MOTOR_POWER - turn;
+         pwr_2 = MOTOR_POWER + turn;
+
+         if (pwr_1 > 100 ) {
+            pwr_1 = 100;
+         } else if ( pwr_1 < 0 ) {
+            pwr_1 = 0;
+         }
+
+         if (pwr_2 > 100 ) {
+            pwr_2 = 100;
+         } else if ( pwr_2 < 0 ) {
+            pwr_2 = 0;
+         }
+
+         OnFwd( MOTOR_RIGHT, pwr_1);
+         OnFwd( MOTOR_LEFT, pwr_2 );
+
+         ClearScreen();
+
+         TextOut( 0, LCD_LINE1, "Distance: " );
+         NumOut( 5*12, LCD_LINE1, distance );
+         TextOut( 0, LCD_LINE2, "Error: " );
+         NumOut( 5*9, LCD_LINE2, error );
+         TextOut( 0, LCD_LINE3, "Turn: " );
+         NumOut( 5*8, LCD_LINE3, turn );
+
+         last_error = error;
+
+    }
+
+    ExitTo( followFinishLine );
+
+}
+
+/**
+    Updating distance from ultrasonic sensor.
+    As function, this would lag the parent task.
+**/
+task updateDistance() {
+     while( g_should_update ) {
+            g_distance = SensorUS( PORT_ULTRASONIC ) - US_CALIBRATION;
+     }
+}
+
+/**
+    Follows line unless the maze is found.
+**/
+task followStartLine() {
+
+     float turn = 0.0;
+     float error = 0.0;
+     float integral = 0.0;
+     float derivative = 0.0;
+     float last_error = 0.0;
+     int pwr_1 = 0;
+     int pwr_2 = 0;
+     long timer_start = CurrentTick();
+     long timer_now = 0;
+     
+     while( true ) {
+     
+            timer_now = CurrentTick();
+            
+            // Dirty hack, which ignores distance during leaving the start line.
+            if( timer_now - timer_start > 2500 ) {
+                if ( g_distance < 15 ) {
+                   Forward();
+                   Wait(1000);
+                   break;
+                }
+            }
+
+            error = (g_light_mid - Sensor( PORT_LIGHT ));
+            
+            integral = integral + error;
+            derivative = (error - last_error);
+            
+            turn = PID_LINE_PROPORTIONAL * error + PID_LINE_INTEGRAL * integral + PID_LINE_DERIVATIVE * derivative;
+            
+            if ( integral > 2*error || integral < -2*error ) {
+               integral = 0.0;
+            }
+
+            pwr_1 = 60 + turn;
+            pwr_2 = 60 - turn;
+            
+            if (pwr_1 > 100 ) {
+               pwr_1 = 100;
+            } else if ( pwr_1 < -100 ) {
+              pwr_1 = -100;
+            }
+            
+            if (pwr_2 > 100 ) {
+               pwr_2 = 100;
+            } else if ( pwr_2 < -100 ) {
+              pwr_2 = -100;
+            }
+            
+            OnFwd( MOTOR_RIGHT, pwr_1);
+            OnFwd( MOTOR_LEFT, pwr_2);
+            
+            ClearScreen();
+            NumOut(0, LCD_LINE1, error );
+            NumOut(0, LCD_LINE2, integral );
+            NumOut(0, LCD_LINE3, derivative );
+            NumOut(0, LCD_LINE4, turn );
+            NumOut(0, LCD_LINE6, g_distance );
+            
+            last_error = error;
+     }
+     
+     g_should_update = false;
+     ExitTo( solveMaze );
+}
+
+task main() {
+
+    SetSensor( PORT_TOUCH_RIGHT, SENSOR_TOUCH );
+    SetSensor( PORT_TOUCH_LEFT, SENSOR_TOUCH );
+     
+    SetSensor( PORT_LIGHT, SENSOR_NXTLIGHT );
+    SetSensorLowspeed( PORT_ULTRASONIC );
+     
+    CalibrateLightSensor();
+    StartTask( updateDistance );
+    StartTask( followStartLine );
+    
+}
